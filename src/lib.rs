@@ -2,7 +2,14 @@
 //!
 //! [`PostgresStorageWithListener`]: crate::PostgresStorage
 //! [`SharedPostgresStorage`]: crate::shared::SharedPostgresStorage
-use std::{fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug, marker::PhantomData, time::Duration};
+
+/// Default ceiling for the polling fetcher's idle backoff.
+///
+/// An idle queue takes ~8.5 minutes of doubling to reach it, and chained queues
+/// pay that per hop, so latency-sensitive queues should lower it with
+/// [`PostgresStorage::set_max_poll_backoff`].
+pub const DEFAULT_MAX_POLL_BACKOFF: Duration = Duration::from_secs(60 * 5);
 
 pub use apalis_codec::json::JsonCodec;
 use apalis_core::{
@@ -84,6 +91,7 @@ pub struct PostgresStorage<
     _marker: PhantomData<(Args, Compact, Codec)>,
     pool: PgPool,
     config: Config,
+    max_poll_backoff: Duration,
     #[pin]
     fetcher: Fetcher,
     #[pin]
@@ -104,6 +112,7 @@ impl<Args, Compact, Codec, Fetcher: Clone> Clone
             _marker: PhantomData,
             pool: self.pool.clone(),
             config: self.config.clone(),
+            max_poll_backoff: self.max_poll_backoff,
             fetcher: self.fetcher.clone(),
             sink: self.sink.clone(),
         }
@@ -138,6 +147,7 @@ impl<Args> PostgresStorage<Args> {
             _marker: PhantomData,
             pool: pool.clone(),
             config: config.clone(),
+            max_poll_backoff: DEFAULT_MAX_POLL_BACKOFF,
             fetcher: PgFetcher {
                 _marker: PhantomData,
             },
@@ -155,6 +165,7 @@ impl<Args> PostgresStorage<Args> {
             _marker: PhantomData,
             pool: pool.clone(),
             config: config.clone(),
+            max_poll_backoff: DEFAULT_MAX_POLL_BACKOFF,
             fetcher: PgNotify::default(),
             sink,
         }
@@ -172,12 +183,30 @@ impl<Args> PostgresStorage<Args> {
 }
 
 impl<Args, Compact, Codec, Fetcher> PostgresStorage<Args, Compact, Codec, Fetcher> {
+    /// Sets the ceiling for the polling fetcher's idle backoff.
+    ///
+    /// The fetcher doubles its poll delay from 1s every time a fetch comes back
+    /// empty, and resets to 1s as soon as one returns work. This caps how far the
+    /// doubling goes, and therefore the worst-case pickup latency of an idle
+    /// queue. Defaults to [`DEFAULT_MAX_POLL_BACKOFF`].
+    #[must_use]
+    pub fn set_max_poll_backoff(mut self, max_poll_backoff: Duration) -> Self {
+        self.max_poll_backoff = max_poll_backoff;
+        self
+    }
+
+    /// Returns the ceiling for the polling fetcher's idle backoff.
+    pub fn max_poll_backoff(&self) -> Duration {
+        self.max_poll_backoff
+    }
+
     pub fn with_codec<NewCodec>(self) -> PostgresStorage<Args, Compact, NewCodec, Fetcher> {
         PostgresStorage {
             _marker: PhantomData,
             sink: PgSink::new(&self.pool, &self.config),
             pool: self.pool,
             config: self.config,
+            max_poll_backoff: self.max_poll_backoff,
             fetcher: self.fetcher,
         }
     }
@@ -278,6 +307,7 @@ where
                 &self.pool,
                 &self.config,
                 worker,
+                self.max_poll_backoff,
             ))
             .boxed()
     }
@@ -440,6 +470,7 @@ impl<Args, Decode> PostgresStorage<Args, CompactType, Decode, PgNotify> {
             &self.pool,
             &self.config,
             worker,
+            self.max_poll_backoff,
         ));
         register.chain(select(lazy_fetcher, eager_fetcher)).boxed()
     }
