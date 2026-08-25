@@ -123,6 +123,7 @@ impl<Args, Compact, Codec> MakeShared<Args> for SharedPostgresStorage<Compact, C
         Ok(PostgresStorage {
             _marker: PhantomData,
             config,
+            max_poll_backoff: crate::DEFAULT_MAX_POLL_BACKOFF,
             fetcher: SharedFetcher {
                 poller: self.drive.clone(),
                 receiver: Arc::new(Mutex::new(rx)),
@@ -288,6 +289,7 @@ impl<Args, Decode> PostgresStorage<Args, CompactType, Decode, SharedFetcher> {
             &self.pool,
             &self.config,
             worker,
+            self.max_poll_backoff,
         ));
         register.chain(select(lazy_fetcher, eager_fetcher))
     }

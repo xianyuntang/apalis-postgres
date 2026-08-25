@@ -63,6 +63,7 @@ pub struct PgPollFetcher<Compact> {
     #[pin]
     state: StreamState<Compact>,
     current_backoff: Duration,
+    max_backoff: Duration,
     last_fetch_time: Option<Instant>,
 }
 
@@ -74,13 +75,19 @@ impl<Compact> Clone for PgPollFetcher<Compact> {
             wrk: self.wrk.clone(),
             state: StreamState::Ready,
             current_backoff: self.current_backoff,
+            max_backoff: self.max_backoff,
             last_fetch_time: self.last_fetch_time,
         }
     }
 }
 
 impl PgPollFetcher<CompactType> {
-    pub fn new(pool: &Pool<Postgres>, config: &Config, wrk: &WorkerContext) -> Self {
+    pub fn new(
+        pool: &Pool<Postgres>,
+        config: &Config,
+        wrk: &WorkerContext,
+        max_backoff: Duration,
+    ) -> Self {
         let initial_backoff = Duration::from_secs(1);
         Self {
             pool: pool.clone(),
@@ -88,6 +95,7 @@ impl PgPollFetcher<CompactType> {
             wrk: wrk.clone(),
             state: StreamState::Ready,
             current_backoff: initial_backoff,
+            max_backoff,
             last_fetch_time: None,
         }
     }
@@ -157,9 +165,15 @@ impl Stream for PgPollFetcher<CompactType> {
 }
 
 impl<Compact> PgPollFetcher<Compact> {
+    /// Doubles the idle backoff up to the ceiling set by
+    /// [`PostgresStorage::set_max_poll_backoff`], which defaults to
+    /// [`DEFAULT_MAX_POLL_BACKOFF`].
+    ///
+    /// [`PostgresStorage::set_max_poll_backoff`]: crate::PostgresStorage::set_max_poll_backoff
+    /// [`DEFAULT_MAX_POLL_BACKOFF`]: crate::DEFAULT_MAX_POLL_BACKOFF
     fn next_backoff(&self, current: Duration) -> Duration {
         let doubled = current * 2;
-        std::cmp::min(doubled, Duration::from_secs(60 * 5))
+        std::cmp::min(doubled, self.max_backoff)
     }
 
     #[allow(unused)]
